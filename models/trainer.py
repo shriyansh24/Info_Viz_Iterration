@@ -78,7 +78,9 @@ MODEL_CONFIGS = {
             'min_samples_split': [2, 5, 8],
             'min_samples_leaf': [1, 2, 4],
             'subsample': [0.7, 0.8, 0.9, 1.0],         # Try more aggressive subsampling
-            'max_features': ['sqrt', 'log2', None]     # Try different feature selection
+            'max_features': ['sqrt', 'log2', None],     # Try different feature selection
+            'n_iter_no_change': [5],
+            'validation_fraction': [0.1]
         }
     },
     'ElasticNet': {  # Add ElasticNet which often works well for CPI prediction
@@ -192,7 +194,7 @@ def build_models(X: pd.DataFrame, y: pd.Series,
         return {}, {}, pd.DataFrame(columns=['Feature', 'Importance'])
 
 def build_models_default(X_train: pd.DataFrame, y_train: pd.Series, 
-                        X_test: pd.DataFrame, y_test: pd.Series) -> Dict[str, Any]:
+                         X_test: pd.DataFrame, y_test: pd.Series) -> Dict[str, Any]:
     """
     Build models with default parameters but added robustness and explainability.
     
@@ -234,14 +236,14 @@ def build_models_default(X_train: pd.DataFrame, y_train: pd.Series,
             selection='random'
         ),
         'Random Forest': RandomForestRegressor(
-            n_estimators=150,  # More trees for better performance
-            max_depth=15,      # Deeper trees to capture complex relationships
+            n_estimators=150,
+            max_depth=10,        # shallower trees
             min_samples_split=5,
-            min_samples_leaf=2,
+            min_samples_leaf=5,  # larger leaf size
             max_features='sqrt',
             bootstrap=True,
             random_state=42,
-            n_jobs=-1  # Use all available cores
+            n_jobs=-1
         ),
         'Gradient Boosting': GradientBoostingRegressor(
             n_estimators=150,
@@ -251,7 +253,9 @@ def build_models_default(X_train: pd.DataFrame, y_train: pd.Series,
             min_samples_leaf=2,
             subsample=0.8,
             max_features='sqrt',
-            random_state=42
+            random_state=42,
+            n_iter_no_change=5,      # early stopping
+            validation_fraction=0.1
         )
     }
     
@@ -266,7 +270,15 @@ def build_models_default(X_train: pd.DataFrame, y_train: pd.Series,
             logger.info(f"Training {name} model")
             model.fit(X_train_scaled, y_train)
             trained_models[name] = model
-            
+
+            # compute CV RMSE to monitor over‑fit
+            cv_mse = -cross_val_score(
+                model, X_train_scaled, y_train,
+                cv=5, scoring='neg_mean_squared_error',
+                n_jobs=-1
+            ).mean()
+            model_scores[name]['CV_RMSE'] = np.sqrt(cv_mse)
+
             # Make predictions
             try:
                 y_pred = model.predict(X_test_scaled)
@@ -280,23 +292,23 @@ def build_models_default(X_train: pd.DataFrame, y_train: pd.Series,
                 mae = mean_absolute_error(y_test, y_pred)
                 r2 = r2_score(y_test, y_pred)
                 
-                model_scores[name] = {
+                model_scores[name].update({
                     'MSE': mse,
                     'RMSE': rmse,
                     'MAE': mae,
                     'R²': r2
-                }
+                })
                 
                 logger.info(f"{name} model trained. R² score: {r2:.4f}")
             except Exception as eval_error:
                 logger.error(f"Error evaluating {name} model: {eval_error}")
-                model_scores[name] = {
+                model_scores[name].update({
                     'MSE': float('nan'),
                     'RMSE': float('nan'),
                     'MAE': float('nan'),
                     'R²': float('nan'),
                     'Error': str(eval_error)
-                }
+                })
         except Exception as e:
             logger.error(f"Error training {name} model: {e}")
             # Model failed, don't add it to trained_models
